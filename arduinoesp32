@@ -1,0 +1,297 @@
+
+#include <Arduino.h>
+#include "DHT.h"
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <SPI.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_INA219.h>
+#include <Fonts/FreeSerifItalic12pt7b.h>
+#if defined(ESP32)
+  #include <WiFi.h>
+#elif defined(ESP8266)
+  #include <ESP8266WiFi.h>
+#endif
+#include <Firebase_ESP_Client.h>
+
+#include "addons/TokenHelper.h"
+
+#include "addons/RTDBHelper.h"
+
+#define WIFI_SSID "Circuit seeker"
+
+#define WIFI_PASSWORD "123456789"
+
+#define API_KEY "AIzaSyAny-hXkC0I2GDj_yePUKeNqAUAaP5uOfI"
+
+#define DATABASE_URL "bmsdata-d4e01-default-rtdb.asia-southeast1.firebasedatabase.app"
+
+FirebaseData fbdo;
+
+FirebaseAuth auth;
+FirebaseConfig config;
+
+unsigned long sendDataPrevMillis = 0;
+bool signupOK = false;
+
+
+#define DHTTYPE DHT11
+#define DHTPIN 2
+
+#define VOLTAGE_SENSOR_PIN1 34
+#define VOLTAGE_SENSOR_PIN2 35
+#define VOLTAGE_SENSOR_PIN3 32
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+DHT dht(DHTPIN, DHTTYPE);
+
+float vOUT1 = 0.0, vOUT2 = 0.0, vOUT3 = 0.0;
+float vIN1 = 0.0, vIN2 = 0.0, vIN3 = 0.0;
+float R1 = 30000.0;
+float R2 = 7500.0;
+
+
+// INA219 Sensor
+Adafruit_INA219 ina219;
+float current_mA = 0;
+float loadvoltage = 0;
+float power_mW = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  // Firebase setup
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("ok");
+    signupOK = true;
+  } else {
+    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Sensor and display setup
+  dht.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("Prayana    Electric");
+  display.display();
+  delay(2000);
+
+  for (int i = 0; i < 10; i++) {
+    display.startscrollleft(0x00, 0x0F);
+    delay(1000);
+  }
+  display.stopscroll();
+
+  display.clearDisplay();
+  display.display();
+
+  // INA219 initialization
+  if (!ina219.begin()) {
+    Serial.println("Failed to find INA219 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+  display.clearDisplay();
+  Serial.println("Measuring voltage and current with INA219 ...");
+}
+
+void loop() {
+  delay(2000);
+
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  float heatIndex = dht.computeHeatIndex(temperature, humidity, false);
+
+  int value1 = analogRead(VOLTAGE_SENSOR_PIN1);
+  float vOUT1 = (value1 * 3.3) / 4095.0;
+  float vIN1 = vOUT1 / (R2 / (R1 + R2));
+
+  int value2 = analogRead(VOLTAGE_SENSOR_PIN2);
+  float vOUT2 = (value2 * 3.3) / 4095.0;
+  float vIN2 = vOUT2 / (R2 / (R1 + R2));
+
+  int value3 = analogRead(VOLTAGE_SENSOR_PIN3);
+  float vOUT3 = (value3 * 3.3) / 4095.0;
+  float vIN3 = vOUT3 / (R2 / (R1 + R2));
+
+  // Read INA219 sensor data
+  float shuntvoltage = ina219.getShuntVoltage_mV();
+  float busvoltage = ina219.getBusVoltage_V();
+  current_mA = ina219.getCurrent_mA();
+  power_mW = ina219.getPower_mW();
+  loadvoltage = busvoltage + (shuntvoltage / 1000);
+
+  Serial.print("Humidity: ");
+  Serial.print(humidity);
+  Serial.print(" %\t");
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.print(" *C\t");
+  Serial.print("Heat index: ");
+  Serial.print(heatIndex);
+  Serial.println(" *C");
+
+  Serial.print("Voltage1: ");
+  Serial.print(vIN1);
+  Serial.println(" V");
+  Serial.print("Voltage2: ");
+  Serial.print(vIN2);
+  Serial.println(" V");
+  Serial.print("Voltage3: ");
+  Serial.print(vIN3);
+  Serial.println(" V");
+
+  Serial.print("Load Voltage:  ");
+  Serial.print(loadvoltage);
+  Serial.println(" V");
+  Serial.print("Current:       ");
+  Serial.print(current_mA);
+  Serial.println(" mA");
+  Serial.print("Power:         ");
+  Serial.print(power_mW);
+  Serial.println(" mW");
+  Serial.println("");
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("Humidity: ");
+  display.print(humidity);
+  display.println(" %");
+  display.print("Temp: ");
+  display.print(temperature);
+  display.println(" *C");
+  display.print("Heat index: ");
+  display.print(heatIndex);
+  display.println(" *C");
+  display.print("Voltage1: ");
+  display.print(vIN1);
+  display.println(" V");
+  display.print("Voltage2: ");
+  display.print(vIN2);
+  display.println(" V");
+  display.print("Voltage3: ");
+  display.print(vIN3);
+  display.println(" V");
+  display.print(loadvoltage);
+  display.print("V");
+  display.print(current_mA);
+  display.print("mA");
+  display.print(power_mW);
+  display.print("mW");
+
+
+  display.display();
+
+  delay(2000);
+
+
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 15000 || sendDataPrevMillis == 0)) {
+    sendDataPrevMillis = millis();
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/humidity", humidity)) {
+      Serial.println("Humidity data sent successfully");
+    } else {
+      Serial.println("Failed to send humidity data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/temperature", temperature)) {
+      Serial.println("Temperature data sent successfully");
+    } else {
+      Serial.println("Failed to send temperature data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/heatIndex", heatIndex)) {
+      Serial.println("Heat index data sent successfully");
+    } else {
+      Serial.println("Failed to send heat index data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/voltage1", vIN1)) {
+      Serial.println("Voltage1 data sent successfully");
+    } else {
+      Serial.println("Failed to send Voltage1 data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/voltage2", vIN2)) {
+      Serial.println("Voltage2 data sent successfully");
+    } else {
+      Serial.println("Failed to send Voltage2 data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/voltage3", vIN3)) {
+      Serial.println("Voltage3 data sent successfully");
+    } else {
+      Serial.println("Failed to send Voltage3 data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/loadVoltage", loadvoltage)) {
+      Serial.println("Load voltage data sent successfully");
+    } else {
+      Serial.println("Failed to send load voltage data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/current", current_mA)) {
+      Serial.println("Current data sent successfully");
+    } else {
+      Serial.println("Failed to send current data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensors/power", power_mW)) {
+      Serial.println("Power data sent successfully");
+    } else {
+      Serial.println("Failed to send power data");
+      Serial.println("Reason: " + fbdo.errorReason());
+    }
+  }
+}
+
+
